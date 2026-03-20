@@ -1,0 +1,5 @@
+# Dépendances Threads Fake Cleaner v8
+customtkinter>=5.2.0
+playwright>=1.40.0
+python-dotenv>=1.0.0
+threads-api>=1.1.14
