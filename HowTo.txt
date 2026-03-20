@@ -1,0 +1,75 @@
+Voici le guide complet et structuré pour installer l'environnement nécessaire au **Wav Fake Cleaner**. Ce tutoriel est conçu pour être suivi étape par étape.
+
+---
+
+## 1. Installation de Python
+
+Le script nécessite **Python 3.10** ou une version supérieure pour fonctionner correctement.
+
+- Rends-toi sur [python.org](https://www.python.org/downloads/).
+- Télécharge la dernière version stable pour Windows.
+- **CRUCIAL** : Lors du lancement de l'installeur, coche impérativement la case **"Add Python to PATH"** avant de cliquer sur "Install Now". Si tu oublies cette étape, les commandes `python` et `pip` ne seront pas reconnues dans ton terminal.
+
+---
+
+## 2. Préparation du dossier de travail
+
+Avant d'installer les bibliothèques, assure-toi que tes fichiers sont bien organisés.
+
+- Crée un dossier dédié à ton projet (ex: `C:\WavFakeCleaner`).
+- Place les fichiers suivants à l'intérieur :
+  - `app.py` 
+  - `requirements.txt` 
+- Ouvre un terminal (PowerShell ou CMD) directement dans ce dossier.
+
+---
+
+## 3. Installation des dépendances Python
+
+Les dépendances sont listées dans ton fichier `requirements.txt`. [cite_start]Elles permettent de gérer l'interface graphique et le pilotage du navigateur[cite: 1].
+
+- Tape la commande suivante dans ton terminal :
+```bash
+pip install -r requirements.txt
+```
+
+- Cette commande installe automatiquement :
+  - **CustomTkinter** : pour l'interface visuelle moderne.
+  - **Playwright** : pour l'automatisation du navigateur Chrome.
+
+---
+
+## 4. Installation de Playwright Chromium
+
+L'installation de la bibliothèque Python ne suffit pas ; Playwright a besoin de ses propres binaires de navigation pour interagir avec Threads.
+
+- Tape la commande suivante :
+```bash
+playwright install chromium
+```
+- Cela va télécharger une version optimisée de Chromium utilisée par le script pour le scan et le nettoyage.
+
+---
+
+## 5. Configuration de Google Chrome
+
+Ton script est configuré pour utiliser **Google Chrome** via le protocole CDP (Chrome DevTools Protocol) sur le port **9222**.
+
+- Assure-toi que Google Chrome est installé sur ton ordinateur à l'un des emplacements standards (Program Files).
+- Le script s'occupe de lancer Chrome avec les bons paramètres (`--remote-debugging-port=9222`) et de créer un profil utilisateur local nommé `chrome_profile` dans ton dossier de projet.
+
+---
+
+## 6. Lancement de l'application
+
+Une fois que tout est installé, tu es prêt à démarrer.
+
+- Dans ton terminal, lance la commande :
+```bash
+python app.py
+```
+- **Procédure de première utilisation** :
+  - Clique sur **"🚀 Lancer Chrome"** dans l'interface.
+  - Une fenêtre Chrome s'ouvre : connecte-toi manuellement à ton compte Threads.
+  - Une fois connecté, tu peux fermer Chrome ou le laisser ouvert, puis cliquer sur **"📥 Récupérer abonnés"** pour commencer l'analyse.
+
