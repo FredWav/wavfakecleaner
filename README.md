@@ -25,7 +25,7 @@ L'ordre des opérations suit la structure de l'interface pour garantir l'intégr
 2.  - **📥 Récupérer abonnés** : Extraction hybride via l'API interne (vitesse maximale) avec fallback par défilement automatique (scroll).
 3.  - **🔍 Scanner les profils** : Analyse granulaire de chaque compte (bio, activité, photo, posts récents) pour attribuer un score de 0 à 100.
 4.  - **🧹 Nettoyer les fakes** : Suppression ou blocage définitif des comptes dépassant le seuil critique (recommandé : 70/100).
-5.  - **🤖 Autopilot** : Automatisation complète des cycles de scan et de nettoyage avec détection des ré-follows.
+5.  - **🤖 Autopilot** : Automatisation complète des cycles de scan et de nettoyage avec détection des re-follows.
 
 ## Profils de Sécurité (Anti-Ban)
 
