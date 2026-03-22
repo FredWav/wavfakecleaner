@@ -1,6 +1,8 @@
 # Wav Fake Cleaner (GUI)
 
-Outil de nettoyage automatisé pour Threads. Ce programme identifie les comptes inactifs ou automatisés (bots) via un système de scoring propriétaire et permet leur suppression sécurisée.
+Outil de nettoyage automatisé pour Threads. Ce programme identifie les comptes inactifs ou automatisés (bots) via un système de scoring propriétaire et permet leur suppression sécurisée.µ
+
+Release pour Windows disponible
 
 ## Installation
 
