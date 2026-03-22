@@ -21,7 +21,7 @@ jobs:
       - name: Build with PyInstaller
         run: |
           source venv/bin/activate
-          pyinstaller --noconfirm --onefile --windowed --collect-all customtkinter --name "WavFakeCleaner_Mac" app2.py
+          pyinstaller --noconfirm --onefile --windowed --collect-all customtkinter --name "WavFakeCleaner_Mac" app.py
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
