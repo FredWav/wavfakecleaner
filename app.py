@@ -1,5 +1,15 @@
 import customtkinter as ctk
 import asyncio, threading, json, os, re, time, random, subprocess, socket, csv, logging, webbrowser
+import sys 
+
+CHROME_PATHS = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", # Chemin standard macOS
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", # Optionnel: Fallback Brave
+]
+
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 from tkinter import messagebox
@@ -215,14 +225,28 @@ def launch_chrome():
     path = find_chrome()
     if not path:
         return False
-    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    # Commande de kill adaptée à l'OS
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            # Sur Mac/Linux on utilise pkill
+            subprocess.run(["pkill", "-f", "Google Chrome"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
     time.sleep(2)
+    
+    # Lancement avec les arguments de debugging
     subprocess.Popen([path,
                       f"--remote-debugging-port={CDP_PORT}",
                       f"--user-data-dir={CHROME_PROFILE}",
                       "--no-first-run", "--no-default-browser-check",
                       "--start-maximized", "https://www.threads.net"])
+    
     for _ in range(20):
         time.sleep(1)
         if is_port_open():
