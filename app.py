@@ -1,15 +1,5 @@
 import customtkinter as ctk
 import asyncio, threading, json, os, re, time, random, subprocess, socket, csv, logging, webbrowser
-import sys 
-
-CHROME_PATHS = [
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", # Chemin standard macOS
-    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", # Optionnel: Fallback Brave
-]
-
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 from tkinter import messagebox
@@ -225,28 +215,14 @@ def launch_chrome():
     path = find_chrome()
     if not path:
         return False
-    
-    # Commande de kill adaptée à l'OS
-    try:
-        if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            # Sur Mac/Linux on utilise pkill
-            subprocess.run(["pkill", "-f", "Google Chrome"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
-
+    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(2)
-    
-    # Lancement avec les arguments de debugging
     subprocess.Popen([path,
                       f"--remote-debugging-port={CDP_PORT}",
                       f"--user-data-dir={CHROME_PROFILE}",
                       "--no-first-run", "--no-default-browser-check",
                       "--start-maximized", "https://www.threads.net"])
-    
     for _ in range(20):
         time.sleep(1)
         if is_port_open():
@@ -2349,7 +2325,6 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
                 trace("CLEAN", f"@{pseudo}: remove_follower={action} {time.time()-t2:.1f}s")
                 if not action:
                     log_fn(f"  🧹 [{i+1}/{total}] @{pseudo} → ⚠️ option introuvable")
-                    # Diagnostic → file only
                     try:
                         menu_diag = await page.evaluate(r"""
                         () => {
@@ -2367,7 +2342,7 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
                     except Exception:
                         pass
                     await page.screenshot(path=f"debug_menu_{pseudo}.png")
-                    log_file("SKIP", pseudo, data.get("score"),
+                    log_file("RATE_LIMIT_MENU", pseudo, data.get("score"),
                              "option remove/block introuvable")
                     db["followers"][pseudo]["status"] = "skipped"
                     save_db(db)
@@ -2375,7 +2350,12 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
                         await page.keyboard.press("Escape")
                     except Exception:
                         pass
-                    continue
+
+                    # Immediate stop — rate limit on remove actions
+                    log_fn("🛑 Rate limit — options de suppression bloquées")
+                    stop_event.set()
+                    self_429[0] = True
+                    break
 
                 await isleep(0.7, stop_event)
                 if stop_event.is_set():
@@ -2611,19 +2591,19 @@ class App(ctk.CTk):
         self._set_running(False)
 
     def _show_rate_limit_popup(self):
-        """Show a popup when Threads returns HTTP 429."""
+        """Show a popup when Threads rate-limits actions."""
         def _show():
             messagebox.showwarning(
-                "⛔ Rate Limit Threads (HTTP 429)",
-                "Threads a bloqué temporairement les requêtes.\n\n"
-                "Votre adresse IP est rate-limitée (trop de visites de profils).\n\n"
+                "⛔ Rate Limit Threads",
+                "Threads a bloqué les actions de suppression.\n\n"
                 "Actions recommandées :\n"
                 "  1. Fermez Chrome\n"
-                "  2. Attendez au minimum 6 heures\n"
+                "  2. Attendez au minimum 2 heures\n"
+                "     (6 heures si erreur HTTP 429)\n"
                 "  3. Vérifiez manuellement que threads.com\n"
                 "     fonctionne avant de relancer\n\n"
-                "⚠️  Relancer trop tôt peut prolonger le blocage.\n\n"
-                "Toutes les actions ont été stoppées automatiquement."
+                "⚠️  Relancer trop tôt prolonge le blocage.\n\n"
+                "Toutes les actions ont été stoppées."
             )
         self.after(0, _show)
 
