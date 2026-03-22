@@ -1,0 +1,30 @@
+name: Build Mac Version
+on: [push]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install customtkinter playwright pyinstaller
+          
+      - name: Build with PyInstaller
+        run: |
+          source venv/bin/activate
+          pyinstaller --noconfirm --onefile --windowed --collect-all customtkinter --name "WavFakeCleaner_Mac" app2.py
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WavFakeCleaner_Mac
+          path: dist/WavFakeCleaner_Mac.app
