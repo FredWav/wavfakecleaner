@@ -274,12 +274,15 @@ async def _navigate_to_profile(page, username, log_fn=None, timeout=15000):
             await asyncio.sleep(1.5)
         except Exception as e:
             err_str = str(e)
-            if "429" in err_str or "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_str:
-                # Check if it's really a 429 by looking at the page
+            if "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_str:
+                # Could be 429 or other HTTP error — check body
                 try:
                     body = await page.evaluate(
-                        "() => document.body?.innerText || ''")
-                    if "429" in body or "cette page ne fonctionne pas" in body.lower():
+                        "() => (document.body?.innerText || '').substring(0, 300)")
+                    is_429 = ("429" in body and
+                              "cette page ne fonctionne pas" in body.lower())
+                    is_toomany = "too many requests" in body.lower()
+                    if is_429 or is_toomany:
                         raise RateLimitError("HTTP 429")
                 except RateLimitError:
                     raise
@@ -1112,10 +1115,27 @@ async def extract_profile_data(page, username: str, log_fn=None) -> dict:
             )
         except Exception as nav_err:
             err_str = str(nav_err)
-            if "429" in err_str or "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_str:
-                _log(f"⛔ HTTP 429 rate limit détecté")
+            if "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_str:
+                # Could be 429 or 404 — check page body to confirm
+                try:
+                    body = await page.evaluate(
+                        "() => (document.body?.innerText || '').substring(0, 300)")
+                    if ("\b429\b" in body or "429" in body) and \
+                       "cette page ne fonctionne pas" in body.lower():
+                        _log("⛔ HTTP 429 confirmé après ERR_HTTP")
+                        data["not_found"] = True
+                        data["error"] = "429_RATE_LIMIT"
+                        return data
+                    if "too many requests" in body.lower():
+                        _log("⛔ HTTP 429 confirmé (too many requests)")
+                        data["not_found"] = True
+                        data["error"] = "429_RATE_LIMIT"
+                        return data
+                except Exception:
+                    pass
+                # Not a 429 — treat as regular nav error
+                _log(f"ERR_HTTP non-429: {err_str[:80]}")
                 data["not_found"] = True
-                data["error"] = "429_RATE_LIMIT"
                 return data
             raise
 
@@ -1137,13 +1157,20 @@ async def extract_profile_data(page, username: str, log_fn=None) -> dict:
         data["full_text"] = full_text
 
         # ── 429 rate limit detection in page body ──
-        if re.search(r"429|too many requests|trop de requêtes"
-                     r"|cette page ne fonctionne pas",
-                     full_text, re.IGNORECASE) and len(full_text) < 500:
-            _log("⛔ HTTP 429 détecté dans le body")
-            data["not_found"] = True
-            data["error"] = "429_RATE_LIMIT"
-            return data
+        # Must see BOTH "429" and an error page indicator together
+        if len(full_text) < 500:
+            has_429_code = bool(re.search(r"\b429\b", full_text))
+            has_error_page = bool(re.search(
+                r"cette page ne fonctionne pas|this page isn.t working",
+                full_text, re.IGNORECASE))
+            has_too_many = bool(re.search(
+                r"too many requests|trop de requêtes",
+                full_text, re.IGNORECASE))
+            if (has_429_code and has_error_page) or has_too_many:
+                _log("⛔ HTTP 429 confirmé dans le body")
+                data["not_found"] = True
+                data["error"] = "429_RATE_LIMIT"
+                return data
 
         if re.search(r"not found|not available|n'est pas disponible"
                      r"|page isn.t available|page introuvable",
