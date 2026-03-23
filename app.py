@@ -95,6 +95,64 @@ async def isleep(seconds: float, stop_event: threading.Event, step: float = 0.2)
             return
         await asyncio.sleep(min(step, end - loop.time()))
 
+
+# ── Human-like pause system ───────────────────────────────────────────────
+class HumanPacer:
+    """Generates realistic pause durations that mimic human browsing behavior.
+
+    - 70% short pauses (quick successive actions)
+    - 20% medium pauses (reading/thinking)
+    - 10% long pauses (distracted, phone down)
+    - Session fatigue: after a burst of actions, takes a long break
+    """
+
+    def __init__(self, base_min=4, base_max=8):
+        self.base_min = base_min
+        self.base_max = base_max
+        self._action_count = 0
+        self._session_length = random.randint(12, 25)  # burst size
+
+    def next_pause(self) -> float:
+        """Return next pause duration in seconds."""
+        self._action_count += 1
+
+        # Session fatigue: after a burst, take a big break
+        if self._action_count >= self._session_length:
+            self._action_count = 0
+            self._session_length = random.randint(10, 25)  # next burst size
+            # Long break: 90-300s (1.5 to 5 min)
+            return random.uniform(90, 300)
+
+        # Normal action: weighted distribution
+        roll = random.random()
+        if roll < 0.70:
+            # Short pause: quick action
+            return random.uniform(self.base_min * 0.5, self.base_max * 0.7)
+        elif roll < 0.90:
+            # Medium pause: reading a profile
+            return random.uniform(self.base_max * 0.8, self.base_max * 1.8)
+        else:
+            # Long pause: human distraction
+            return random.uniform(self.base_max * 2, self.base_max * 4)
+
+    def next_scan_pause(self) -> float:
+        """Shorter pauses for scanning (just navigating, less suspicious)."""
+        self._action_count += 1
+
+        if self._action_count >= self._session_length:
+            self._action_count = 0
+            self._session_length = random.randint(15, 35)
+            return random.uniform(30, 90)
+
+        roll = random.random()
+        if roll < 0.75:
+            return random.uniform(0.3, 0.8)
+        elif roll < 0.92:
+            return random.uniform(1.0, 3.0)
+        else:
+            return random.uniform(5, 12)
+
+
 # ── DB ────────────────────────────────────────────────────────────────────────
 def load_db():
     if not os.path.exists(DB_FILE):
@@ -644,9 +702,9 @@ async def _try_api_fetch(page, db, username, log_fn, stop_event):
 
 
 async def fetch_followers_async(db, log_fn, stop_event: threading.Event,
-                                scroll_speed: int = 120):
+                                scroll_speed: int = 120, max_followers: int = 5000):
     username = db["username"]
-    log_fn(f"📥 Récupération des abonnés de @{username}...")
+    log_fn(f"📥 Récupération des abonnés de @{username} (max {max_followers})...")
 
     # Internal logs go to file only
     _vlog = log_verbose
@@ -663,20 +721,7 @@ async def fetch_followers_async(db, log_fn, stop_event: threading.Event,
             if stop_event.is_set():
                 return
 
-            # ── Tentative API (rapide, pas de scroll) ─────────────────
-            t_api_start = time.time()
-            api_ok = await _try_api_fetch(page, db, username, _vlog, stop_event)
-            trace("FETCH", f"API tentative: {time.time()-t_api_start:.1f}s ok={api_ok}")
-            if api_ok:
-                total_rf = sum(1 for d in db["followers"].values()
-                               if d.get("refollow_count", 0) > 0
-                               and d["status"] == "pending")
-                rf_msg = f" | ♻️ {total_rf} re-follows" if total_rf else ""
-                log_fn(f"  ✅ {len(db['followers'])} abonnés récupérés via API{rf_msg}")
-                return
-
-            # ── Fallback : scroll ─────────────────────────────────────
-            log_fn("  ⚠️ API indisponible — récupération par scroll...")
+            # ── Scroll fetch (direct, no API) ─────────────────────────
 
             # Diagnostic DOM avant de tenter le clic
             try:
@@ -877,6 +922,11 @@ async def fetch_followers_async(db, log_fn, stop_event: threading.Event,
                 elapsed = time.time() - start_time
                 if elapsed > FETCH_MAX_DURATION:
                     _vlog(f"⏱️  Durée maximale ({FETCH_MAX_DURATION//60} min) atteinte.")
+                    break
+
+                # Max followers limit
+                if len(pseudos) >= max_followers:
+                    log_fn(f"  ✅ Limite de {max_followers} abonnés atteinte")
                     break
 
                 await isleep(0.5, stop_event)
@@ -1873,49 +1923,111 @@ async def _click_three_dots(page, log_fn=None) -> bool:
     Layout: [Instagram icon] [Bell icon] [⋯ button] ← this one
     """
     async def _menu_appeared():
+        """Check if the Threads profile menu appeared (not Chrome's menu)."""
         try:
-            await asyncio.sleep(0.5)
-            cnt = await page.locator(
-                "[role='menu'], [role='menuitem'], [role='dialog'] [role='list']"
-            ).count()
-            return cnt > 0
+            await asyncio.sleep(0.8)
+            # Verify it's the right menu by checking for Threads-specific items
+            result = await page.evaluate(r"""
+            () => {
+                const texts = [];
+                const items = document.querySelectorAll(
+                    '[role="menu"] *, [role="menuitem"], [role="dialog"] [role="button"], [role="dialog"] button, [role="dialog"] div[tabindex]'
+                );
+                for (const el of items) {
+                    const t = (el.textContent || '').trim().toLowerCase();
+                    if (t.length > 0 && t.length < 60) texts.push(t);
+                }
+                // Threads menu items we expect
+                const threadItems = [
+                    'supprimer follower', 'remove follower',
+                    'bloquer', 'block',
+                    'restreindre', 'restrict',
+                    'signaler', 'report',
+                    'mettre en sourdine', 'mute',
+                    'copier le lien', 'copy link',
+                    'à propos de ce profil', 'about this profile',
+                ];
+                const found = threadItems.some(ti => 
+                    texts.some(t => t.includes(ti))
+                );
+                return {found, texts: texts.slice(0, 10)};
+            }
+            """)
+            if result and result.get("found"):
+                return True
+            trace("DOTS", f"Menu check: NOT Threads menu. Items: {result.get('texts', [])}")
+            return False
         except Exception:
             return False
 
-    # Strategy 1: JS — find the ⋯ button adjacent to the Instagram link
+    # Strategy 1: JS — find the ⋯ button in the profile header area
     try:
         clicked = await page.evaluate(r"""
             () => {
-                // Find the Instagram link
+                // Find anchor points: Instagram link, bell icon, or header row
                 const igLink = document.querySelector('a[href*="instagram.com"]');
-                if (!igLink) return 'no_ig_link';
                 
-                // Walk up to the row container (the div that holds IG + bell + ⋯)
-                let row = igLink.parentElement;
-                for (let i = 0; i < 5 && row; i++) {
-                    const clickables = row.querySelectorAll(
-                        'div[role="button"], button, [role="button"], [tabindex="0"]'
-                    );
-                    // We need at least 2 clickable items (bell + ⋯) besides the IG link
-                    const btns = Array.from(clickables).filter(el => {
-                        const r = el.getBoundingClientRect();
-                        return r.width > 0 && r.width < 80
-                            && !el.closest('a[href*="instagram"]');
+                // Find all small SVG-only buttons (likely bell + ⋯)
+                const svgBtns = Array.from(document.querySelectorAll(
+                    'div[role="button"], button, [role="button"]'
+                )).filter(b => {
+                    const r = b.getBoundingClientRect();
+                    const t = (b.innerText || '').trim();
+                    return r.width > 0 && r.width < 80 && r.height < 80
+                        && r.top > 50 && r.top < 500
+                        && (t === '' || t === '…' || t === '...' || t === '⋯')
+                        && b.querySelector('svg');
+                });
+                
+                if (!svgBtns.length) return 'no_svg_btns';
+                
+                if (igLink) {
+                    const igRect = igLink.getBoundingClientRect();
+                    // Find buttons on same row as IG link, to its right
+                    const sameRow = svgBtns.filter(b => {
+                        const r = b.getBoundingClientRect();
+                        return Math.abs(r.top - igRect.top) < 40;
                     });
-                    if (btns.length >= 1) {
-                        // The ⋯ is the LAST button in this row (after bell)
-                        btns[btns.length - 1].click();
-                        return 'ig_row_last';
+                    if (sameRow.length > 0) {
+                        // ⋯ is the rightmost one
+                        sameRow.sort((a, b) => 
+                            b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+                        sameRow[0].click();
+                        return 'ig_row_rightmost';
                     }
-                    row = row.parentElement;
                 }
-                return 'no_btn_in_row';
+                
+                // No IG link — look for a cluster of 2+ SVG buttons on the same row
+                // (bell + ⋯ are always together)
+                for (let i = 0; i < svgBtns.length; i++) {
+                    const r1 = svgBtns[i].getBoundingClientRect();
+                    const neighbors = svgBtns.filter(b => {
+                        const r2 = b.getBoundingClientRect();
+                        return b !== svgBtns[i] && Math.abs(r2.top - r1.top) < 30;
+                    });
+                    if (neighbors.length >= 1) {
+                        // Found a pair — click the rightmost one (⋯)
+                        const group = [svgBtns[i], ...neighbors];
+                        group.sort((a, b) => 
+                            b.getBoundingClientRect().left - a.getBoundingClientRect().left);
+                        group[0].click();
+                        return 'svg_pair_rightmost';
+                    }
+                }
+                
+                return 'no_pair_found';
             }
         """)
         trace("DOTS", f"Strategy 1: {clicked}")
-        if clicked and clicked.startswith("ig_row"):
+        if clicked and not clicked.startswith("no_"):
             if await _menu_appeared():
                 return True
+            # Wrong menu opened — press Escape and try next strategy
+            try:
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.3)
+            except Exception:
+                pass
     except Exception as e:
         trace("DOTS", f"Strategy 1 err: {type(e).__name__}")
 
@@ -1930,6 +2042,12 @@ async def _click_three_dots(page, log_fn=None) -> bool:
                 if await _menu_appeared():
                     trace("DOTS", f"Strategy 2: aria={label}")
                     return True
+                # Wrong menu — close it
+                try:
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2008,52 +2126,79 @@ async def _click_remove_follower(page, force_block=False) -> str:
     ]
     block_patterns = [r"^bloquer$", r"^block$"]
 
-    async def _try_remove():
-        for pat in remove_patterns:
+    async def _try_click(patterns, roles=None):
+        """Try to find and click text matching patterns across multiple strategies."""
+        if roles is None:
+            roles = ["menuitem", "button", "link"]
+        # Strategy 1: by role
+        for role in roles:
+            for pat in patterns:
+                try:
+                    item = page.get_by_role(
+                        role, name=re.compile(pat, re.IGNORECASE)
+                    ).first
+                    if await asyncio.wait_for(item.is_visible(), timeout=2.5):
+                        await item.click()
+                        return True
+                except Exception:
+                    pass
+        # Strategy 2: by text (catches divs, spans, etc.)
+        for pat in patterns:
             try:
-                item = page.get_by_role(
-                    "menuitem", name=re.compile(pat, re.IGNORECASE)
+                item = page.get_by_text(
+                    re.compile(pat, re.IGNORECASE)
                 ).first
                 if await asyncio.wait_for(item.is_visible(), timeout=2.0):
                     await item.click()
-                    return "removed"
+                    return True
             except Exception:
                 pass
-        for pat in remove_patterns:
+        # Strategy 3: JS fallback — find any clickable element with matching text
+        for pat in patterns:
             try:
-                item = page.get_by_text(
-                    re.compile(pat, re.IGNORECASE)
-                ).first
-                if await asyncio.wait_for(item.is_visible(), timeout=1.5):
-                    await item.click()
-                    return "removed"
+                clicked = await page.evaluate(r"""
+                (pattern) => {
+                    const regex = new RegExp(pattern, 'i');
+                    const candidates = document.querySelectorAll(
+                        '[role="menuitem"], [role="button"], button, a, div[tabindex], span[role]'
+                    );
+                    for (const el of candidates) {
+                        const t = (el.textContent || '').trim();
+                        if (regex.test(t) && el.offsetHeight > 0) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                """, pat)
+                if clicked:
+                    return True
             except Exception:
                 pass
+        return False
+
+    async def _try_remove():
+        if await _try_click(remove_patterns):
+            return "removed"
         return ""
 
     async def _try_block():
-        for pat in block_patterns:
-            try:
-                item = page.get_by_text(
-                    re.compile(pat, re.IGNORECASE)
-                ).first
-                if await asyncio.wait_for(item.is_visible(), timeout=1.5):
-                    await item.click()
-                    trace("CLEAN", "Bloquer (force_block)" if force_block
-                          else "Fallback: Bloquer")
-                    return "blocked"
-            except Exception:
-                pass
+        if await _try_click(block_patterns):
+            trace("CLEAN", "Bloquer (force_block)" if force_block
+                  else "Fallback: Bloquer")
+            return "blocked"
         return ""
 
+    # Wait a moment for menu to fully render
+    await asyncio.sleep(0.5)
+
     if force_block:
-        # Repeat offender: block first, remove as fallback
         result = await _try_block()
         if result:
             return result
         return await _try_remove()
     else:
-        # Normal: remove first, block as fallback
         result = await _try_remove()
         if result:
             return result
@@ -2080,9 +2225,15 @@ async def _click_confirm(page) -> bool:
 async def run_scan_async(usernames, db, log_fn, threshold, progress_fn,
                          stop_event, dry_run=False):
     results  = {}
+    # Shuffle to avoid predictable navigation patterns
+    usernames = list(usernames)
+    random.shuffle(usernames)
     total    = len(usernames)
     tag      = "🔬 DRY RUN" if dry_run else "🔍 Scan"
     log_fn(f"{tag} de {total} profils...")
+
+    # ── Human-like pacing ──────────────────────────────────────────────
+    pacer = HumanPacer(base_min=2, base_max=6)
 
     # ── Error tracking ────────────────────────────────────────────────
     consecutive_errors = 0
@@ -2222,12 +2373,10 @@ async def run_scan_async(usernames, db, log_fn, threshold, progress_fn,
                     log_verbose(f"@{pseudo} details: {'|'.join(details)}")
 
                 if not stop_event.is_set() and i < total - 1:
-                    if i > 0 and i % get_anti_bot_every() == 0:
-                        pause = random.uniform(8, 15)
-                        log_verbose(f"Pause anti-bot {int(pause)}s")
-                        await isleep(pause, stop_event)
-                    else:
-                        await isleep(random.uniform(0.4, 0.8), stop_event)
+                    pause = pacer.next_scan_pause()
+                    if pause > 15:
+                        log_verbose(f"Session break {int(pause)}s")
+                    await isleep(pause, stop_event)
 
         finally:
             await browser.close()
@@ -2244,7 +2393,14 @@ async def run_scan_async(usernames, db, log_fn, threshold, progress_fn,
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
+    # Shuffle to avoid predictable removal patterns
+    fakes = list(fakes)
+    random.shuffle(fakes)
     rate_limited = False
+
+    # Human-like pacing for clean actions
+    pacer = HumanPacer(base_min=get_pause_min(), base_max=get_pause_max())
+
     async with async_playwright() as p:
         browser   = await p.chromium.connect_over_cdp("http://127.0.0.1:9222")
         ctx, page = await _get_page(browser)
@@ -2351,12 +2507,14 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
                 action = await _click_remove_follower(page, force_block=force_block)
                 trace("CLEAN", f"@{pseudo}: remove_follower={action} {time.time()-t2:.1f}s")
                 if not action:
-                    log_fn(f"  🧹 [{i+1}/{total}] @{pseudo} → ⚠️ option introuvable")
+                    consecutive_errors += 1
+                    log_fn(f"  🧹 [{i+1}/{total}] @{pseudo} → ⚠️ option introuvable "
+                           f"({consecutive_errors}x)")
                     try:
                         menu_diag = await page.evaluate(r"""
                         () => {
                             const items = document.querySelectorAll(
-                                '[role="menu"] *, [role="menuitem"], [role="dialog"] [role="button"], [role="dialog"] button'
+                                '[role="menu"] *, [role="menuitem"], [role="dialog"] [role="button"], [role="dialog"] button, div[tabindex]'
                             );
                             return Array.from(items)
                                 .map(el => (el.textContent || '').trim())
@@ -2369,7 +2527,7 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
                     except Exception:
                         pass
                     await page.screenshot(path=f"debug_menu_{pseudo}.png")
-                    log_file("RATE_LIMIT_MENU", pseudo, data.get("score"),
+                    log_file("SKIP_MENU", pseudo, data.get("score"),
                              "option remove/block introuvable")
                     db["followers"][pseudo]["status"] = "skipped"
                     save_db(db)
@@ -2378,11 +2536,13 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
                     except Exception:
                         pass
 
-                    # Immediate stop — rate limit on remove actions
-                    log_fn("🛑 Rate limit — options de suppression bloquées")
-                    stop_event.set()
-                    self_429[0] = True
-                    break
+                    # 3 consecutive = probably rate limited
+                    if consecutive_errors >= 3:
+                        log_fn("🛑 Rate limit probable — 3 options introuvables d'affilée")
+                        stop_event.set()
+                        self_429[0] = True
+                        break
+                    continue
 
                 await isleep(0.7, stop_event)
                 if stop_event.is_set():
@@ -2419,7 +2579,9 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
                 if stop_event.is_set():
                     break
 
-                pause = random.uniform(get_pause_min(), get_pause_max())
+                pause = pacer.next_pause()
+                if pause > 60:
+                    log_fn(f"  ⏸️ Pause session {int(pause)}s...")
                 log_verbose(f"Pause {int(pause)}s avant prochain clean")
                 await isleep(pause, stop_event)
 
@@ -2430,73 +2592,156 @@ async def run_clean_async(fakes, db, log_fn, progress_fn, stop_event):
 
 
 # ── Autopilot ─────────────────────────────────────────────────────────────────
-AUTOPILOT_REFETCH_EVERY = 3  # Re-fetch followers every N cycles to catch re-follows
+# Autopilot uses its own pacing — ignores profile limits
+AUTOPILOT_FETCH_MAX       = 5000   # Max followers per scroll fetch
+AUTOPILOT_FETCH_INTERVAL  = 5      # Hours between re-fetches
+AUTOPILOT_SCAN_BATCH      = (120, 150)  # Random batch size per scan phase
+AUTOPILOT_CLEAN_BATCH     = (18, 30)    # Random batch size per clean phase
+AUTOPILOT_PAUSE_BETWEEN   = (300, 900)  # 5-15 min between phases
+AUTOPILOT_PAUSE_SCAN      = (900, 1500) # 15-25 min between scan batches
+AUTOPILOT_PAUSE_CLEAN     = (1500, 2100) # 25-35 min between clean batches
+AUTOPILOT_COOLDOWN_ON_ERR = (600, 1200) # 10-20 min cooldown on errors
 
 async def autopilot_loop(db, log_fn, progress_fn, stop_event,
                          threshold_fn, stats_fn):
-    log_fn("🤖 Autopilot démarré")
+    log_fn("🤖 Autopilot démarré — tourne en continu")
+    last_fetch_time = 0  # Force fetch on first cycle
     cycle = 0
+    error_streak = 0
+
     while not stop_event.is_set():
         cycle += 1
+        now = time.time()
 
-        # ── Re-fetch followers periodically to detect re-follows ────
-        if cycle % AUTOPILOT_REFETCH_EVERY == 0:
-            log_fn(f"♻️ Cycle {cycle} — re-fetch abonnés...")
+        # ══════════════════════════════════════════════════════════════
+        # PHASE 1 — FETCH (every AUTOPILOT_FETCH_INTERVAL hours)
+        # ══════════════════════════════════════════════════════════════
+        hours_since_fetch = (now - last_fetch_time) / 3600
+        if hours_since_fetch >= AUTOPILOT_FETCH_INTERVAL or last_fetch_time == 0:
+            log_fn(f"── Phase 1 : Récupération abonnés (cycle {cycle}) ──")
             removed_before = {u for u, d in db["followers"].items()
                               if d["status"] in ("removed", "blocked")}
             try:
-                await fetch_followers_async(db, log_fn, stop_event)
+                await fetch_followers_async(
+                    db, log_fn, stop_event,
+                    max_followers=AUTOPILOT_FETCH_MAX
+                )
+                last_fetch_time = time.time()
+                error_streak = 0
+            except RateLimitError:
+                log_fn("  ⛔ Rate limit pendant le fetch")
+                return {"rate_limited": True}
             except Exception as e:
-                log_fn(f"  ⚠️ Re-fetch échoué: {type(e).__name__}")
+                log_fn(f"  ⚠️ Fetch échoué: {type(e).__name__}")
+                error_streak += 1
+
+            # Detect re-follows
             refollowed = [u for u in removed_before
                           if db["followers"].get(u, {}).get("status") == "pending"]
             if refollowed:
                 log_fn(f"  🔄 {len(refollowed)} re-follows détectés")
-                log_verbose(f"Re-follows: {refollowed[:10]}")
             stats_fn()
+
             if stop_event.is_set():
                 break
 
-        pending = get_pending(db)
-        log_fn(f"── Cycle {cycle} — {len(pending)} à scanner ──")
+            # Pause between phases
+            pause = random.uniform(*AUTOPILOT_PAUSE_BETWEEN)
+            log_fn(f"  ⏸️ Pause {int(pause/60)} min avant scan...")
+            await isleep(pause, stop_event)
+            if stop_event.is_set():
+                break
 
+        # ══════════════════════════════════════════════════════════════
+        # PHASE 2 — SCAN
+        # ══════════════════════════════════════════════════════════════
+        pending = get_pending(db)
         if pending:
+            batch_size = random.randint(*AUTOPILOT_SCAN_BATCH)
+            batch = pending[:batch_size]
+            log_fn(f"── Phase 2 : Scan de {len(batch)} profils (cycle {cycle}) ──")
+
             scan_results = await run_scan_async(
-                pending[:get_scan_batch()], db, log_fn,
+                batch, db, log_fn,
                 threshold_fn(), progress_fn, stop_event
             )
             stats_fn()
+
             if scan_results.get("__429_DETECTED__"):
                 return {"rate_limited": True}
 
-        if stop_event.is_set():
-            break
+            if stop_event.is_set():
+                break
 
+            # Pause after scan — longer if many pending remain
+            remaining = len(get_pending(db))
+            if remaining > 0:
+                pause = random.uniform(*AUTOPILOT_PAUSE_SCAN)
+                log_fn(f"  ⏸️ Pause {int(pause/60)} min ({remaining} restants)...")
+                await isleep(pause, stop_event)
+                if stop_event.is_set():
+                    break
+        else:
+            log_fn(f"── Cycle {cycle} : aucun profil à scanner ──")
+
+        # ══════════════════════════════════════════════════════════════
+        # PHASE 3 — CLEAN
+        # ══════════════════════════════════════════════════════════════
         fakes = get_fakes(db, threshold_fn())
         if fakes:
-            repeat_fakes = [(u, d) for u, d in fakes
-                            if d.get("refollow_count", 0) > 0]
-            rf_info = f" ({len(repeat_fakes)} récidivistes)" if repeat_fakes else ""
-            log_fn(f"🧹 {len(fakes)} fakes à nettoyer{rf_info}")
+            batch_size = random.randint(*AUTOPILOT_CLEAN_BATCH)
+            batch = fakes[:batch_size]
+            repeat = sum(1 for _, d in batch if d.get("refollow_count", 0) > 0)
+            rf_info = f" ({repeat} récidivistes)" if repeat else ""
+            log_fn(f"── Phase 3 : Nettoyage de {len(batch)} fakes{rf_info} "
+                   f"(cycle {cycle}) ──")
+
             clean_result = await run_clean_async(
-                fakes[:get_clean_batch()], db, log_fn,
+                batch, db, log_fn,
                 progress_fn, stop_event
             )
             stats_fn()
+
             if clean_result and clean_result.get("rate_limited"):
-                return {"rate_limited": True}
+                # Rate limited — cooldown instead of full stop
+                cooldown = random.uniform(*AUTOPILOT_COOLDOWN_ON_ERR)
+                error_streak += 1
+                if error_streak >= 3:
+                    log_fn("🛑 Trop d'erreurs consécutives — arrêt")
+                    return {"rate_limited": True}
+                log_fn(f"  ⚠️ Rate limit clean — cooldown {int(cooldown/60)} min "
+                       f"(erreur {error_streak}/3)")
+                await isleep(cooldown, stop_event)
+                if stop_event.is_set():
+                    break
+                continue  # Retry without long pause
+            else:
+                error_streak = 0
+
+            if stop_event.is_set():
+                break
+
+            # Pause after clean
+            remaining_fakes = len(get_fakes(db, threshold_fn()))
+            if remaining_fakes > 0:
+                pause = random.uniform(*AUTOPILOT_PAUSE_CLEAN)
+                log_fn(f"  ⏸️ Pause {int(pause/60)} min ({remaining_fakes} fakes restants)...")
+                await isleep(pause, stop_event)
+                if stop_event.is_set():
+                    break
         else:
-            log_fn("✨ Aucun fake ce cycle")
+            log_fn(f"── Cycle {cycle} : aucun fake à retirer ──")
 
-        if stop_event.is_set():
-            break
-
+        # ══════════════════════════════════════════════════════════════
+        # CHECK — done?
+        # ══════════════════════════════════════════════════════════════
         if not get_pending(db) and not get_fakes(db, threshold_fn()):
-            log_fn("🎉 Nettoyage complet !")
+            log_fn("🎉 Nettoyage complet — tous les profils traités !")
             break
 
-        log_fn("⏸️ Pause 60s...")
-        await isleep(60, stop_event)
+        # Short pause before next cycle
+        pause = random.uniform(60, 180)
+        await isleep(pause, stop_event)
 
     log_fn("⏹️ Autopilot arrêté")
     return {"rate_limited": False}
@@ -3105,26 +3350,33 @@ class App(ctk.CTk):
         pending = len(get_pending(self.db))
         threshold = int(self.slider_threshold.get())
         fakes = len(get_fakes(self.db, threshold))
-        ld, lh = get_limit_day(), get_limit_hour()
-        eta_days = max(fakes / ld, 0.1) if fakes else 0
+        total = len(self.db["followers"])
         refollows = sum(1 for d in self.db["followers"].values()
                         if d.get("refollow_count", 0) > 0)
+
+        # Realistic ETA: ~180 scans/h, ~50 cleans/h with pauses
+        scan_hours = pending / 180 if pending else 0
+        clean_hours = fakes / 50 if fakes else 0
+        total_hours = scan_hours + clean_hours
+        eta_days = total_hours / 24
 
         msg = (
             "🤖 MODE AUTOPILOT\n\n"
             "L'application va tourner en continu :\n"
-            "  • Scanner tous les profils en attente\n"
-            "  • Supprimer/bloquer les fakes détectés\n"
-            "  • Re-fetch les abonnés tous les 3 cycles\n"
-            "  • Bloquer automatiquement les récidivistes\n\n"
+            "  • Récupérer les abonnés (scroll, max 5000)\n"
+            "  • Scanner 120-150 profils par batch\n"
+            "  • Supprimer 18-30 fakes par batch\n"
+            "  • Re-fetch toutes les 5h\n"
+            "  • Pauses réalistes entre chaque phase\n\n"
             f"État actuel :\n"
+            f"  👥 {total} abonnés en base\n"
             f"  📋 {pending} profils à scanner\n"
             f"  🎯 {fakes} fakes à retirer (seuil {threshold}/100)\n"
-            f"  ♻️  {refollows} re-followers connus\n"
-            f"  ⚡ Limite : {ld}/jour, {lh}/heure\n"
-            f"  📅 ETA : ~{eta_days:.0f} jours\n\n"
-            "⚠️  Peut tourner des heures ou des jours.\n"
-            "Appuyez sur ARRÊTER à tout moment pour stopper."
+            f"  ♻️  {refollows} re-followers connus\n\n"
+            f"⏱️  Estimation : ~{total_hours:.0f}h "
+            f"({eta_days:.1f} jours)\n\n"
+            "Tourne 24/24 jusqu'à complétion.\n"
+            "Appuyez sur ARRÊTER à tout moment."
         )
 
         if not messagebox.askyesno("Lancer l'Autopilot ?", msg):
